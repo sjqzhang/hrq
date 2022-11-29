@@ -34,9 +34,8 @@ func main() {
 	//	w.Write([]byte("hello world  sdfasfasdfa"))
 	//})
 
-
-	hrq.GET("/xx",func(w http.ResponseWriter, req *http.Request)  {
-		time.Sleep(time.Microsecond*100)
+	hrq.GET("/xx", func(w http.ResponseWriter, req *http.Request) {
+		time.Sleep(time.Microsecond * 100)
 		w.Write([]byte("hello world  hrq"))
 	})
 
@@ -46,10 +45,14 @@ func main() {
 		c.String(200, "hello world  xxxx")
 	})
 
-	hrq.ApplyForGin(router)
+	hrq.GET("/hello", func(w http.ResponseWriter, req *http.Request) {
+		time.Sleep(time.Microsecond * 100)
+		w.Write([]byte("hello world  helllo"))
+	})
 
+	hrq.ApplyToGin(router)
 
-	//hrq.ApplyForGin(router)
+	//hrq.ApplyFromGin(router)
 
 	//
 	//router.Any("/", func(c *gin.Context) {
@@ -67,4 +70,6 @@ func main() {
 	//	})
 	//})
 	router.Run(":8080")
+
+	//fmt.Println(hrq.ListenAndServe(":8080"))
 }
