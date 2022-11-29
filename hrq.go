@@ -1,10 +1,15 @@
 package hrq
 
 import (
+	"bufio"
+	"context"
 	"github.com/gin-gonic/gin"
 	"github.com/julienschmidt/httprouter"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	// import uuid
@@ -25,9 +30,94 @@ var chanReqRsp = make(chan *reqrsq, 1000)
 var router = httprouter.New()
 var mux = http.NewServeMux()
 
+const (
+	noWritten     = -1
+	defaultStatus = http.StatusOK
+)
+
+type responseWriter struct {
+	http.ResponseWriter
+	size   int
+	status int
+}
+
+func (w *responseWriter) reset(writer http.ResponseWriter) {
+	w.ResponseWriter = writer
+	w.size = noWritten
+	w.status = defaultStatus
+}
+
+func (w *responseWriter) WriteHeader(code int) {
+	if code > 0 && w.status != code {
+		if w.Written() {
+			//log.Printf("[WARNING] Headers were already written. Wanted to override status code %d with %d", w.status, code)
+		}
+		w.status = code
+	}
+}
+
+func (w *responseWriter) WriteHeaderNow() {
+	if !w.Written() {
+		w.size = 0
+		w.ResponseWriter.WriteHeader(w.status)
+	}
+}
+
+func (w *responseWriter) Write(data []byte) (n int, err error) {
+	w.WriteHeaderNow()
+	n, err = w.ResponseWriter.Write(data)
+	w.size += n
+	return
+}
+
+func (w *responseWriter) WriteString(s string) (n int, err error) {
+	w.WriteHeaderNow()
+	n, err = io.WriteString(w.ResponseWriter, s)
+	w.size += n
+	return
+}
+
+func (w *responseWriter) Status() int {
+	return w.status
+}
+
+func (w *responseWriter) Size() int {
+	return w.size
+}
+
+func (w *responseWriter) Written() bool {
+	return w.size != noWritten
+}
+
+// Hijack implements the http.Hijacker interface.
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.size < 0 {
+		w.size = 0
+	}
+	return w.ResponseWriter.(http.Hijacker).Hijack()
+}
+
+// CloseNotify implements the http.CloseNotifier interface.
+func (w *responseWriter) CloseNotify() <-chan bool {
+	return w.ResponseWriter.(http.CloseNotifier).CloseNotify()
+}
+
+// Flush implements the http.Flusher interface.
+func (w *responseWriter) Flush() {
+	w.WriteHeaderNow()
+	w.ResponseWriter.(http.Flusher).Flush()
+}
+
+func (w *responseWriter) Pusher() (pusher http.Pusher) {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher
+	}
+	return nil
+}
+
 func init() {
 	// http queue consumer
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < runtime.NumCPU()*10; i++ {
 		go func() {
 			handler := func() {
 				defer func() {
@@ -38,14 +128,23 @@ func init() {
 				for {
 					select {
 					case reqRsp := <-chanReqRsp:
-						hander, _, _ := router.Lookup(reqRsp.method, reqRsp.path)
-						if hander != nil {
-							hander(reqRsp.rsp, reqRsp.req, nil)
+						ctx := reqRsp.req.Context().Value(gin.ContextKey)
+						if ctx != nil {
+							c := ctx.(*gin.Context)
+							c.Request = reqRsp.req
+							c.Writer = &responseWriter{ResponseWriter: reqRsp.rsp}
+							c.Next()
 							reqRsp.done <- true
 						} else {
-							reqRsp.rsp.WriteHeader(http.StatusNotFound)
-							reqRsp.rsp.Write([]byte("not found"))
-							reqRsp.done <- true
+							hander, _, _ := router.Lookup(reqRsp.method, reqRsp.path)
+							if hander != nil {
+								hander(reqRsp.rsp, reqRsp.req, nil)
+								reqRsp.done <- true
+							} else {
+								reqRsp.rsp.WriteHeader(http.StatusNotFound)
+								reqRsp.rsp.Write([]byte("not found"))
+								reqRsp.done <- true
+							}
 						}
 					}
 				}
@@ -147,9 +246,6 @@ func Router() *httprouter.Router {
 }
 
 func ApplyForGin(ginEngine *gin.Engine) {
-	//ginEngine.Any("/", func(c *gin.Context) {
-	//	ServeHTTP(c.Writer, c.Request)
-	//})
 	lock.RLock()
 	defer lock.RUnlock()
 	for k, v := range handlerMap {
@@ -161,19 +257,10 @@ func ApplyForGin(ginEngine *gin.Engine) {
 	}
 }
 
-//func MiddlewareForGin() gin.HandlerFunc {
-//	return func(c *gin.Context) {
-//		serveHTTP := func(w http.ResponseWriter, r *http.Request) {
-//
-//		}
-//		serveHTTP(c.Writer, c.Request)
-//
-//	}
-//}
-
 func MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ServeHTTP(c.Writer, c.Request)
+		req := c.Request.WithContext(context.WithValue(c.Request.Context(), gin.ContextKey, c))
+		ServeHTTP(c.Writer, req)
 	}
 }
 

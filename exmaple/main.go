@@ -5,6 +5,7 @@ import (
 	"github.com/sjqzhang/hrq"
 	"io/ioutil"
 	"net/http"
+	"time"
 )
 
 //func main() {
@@ -35,10 +36,11 @@ func main() {
 
 
 	hrq.GET("/xx",func(w http.ResponseWriter, req *http.Request)  {
+		time.Sleep(time.Microsecond*100)
 		w.Write([]byte("hello world  hrq"))
 	})
 
-
+	router.Use(hrq.MiddlewareForGin())
 
 	router.GET("/x", func(c *gin.Context) {
 		c.String(200, "hello world  xxxx")
@@ -46,7 +48,7 @@ func main() {
 
 	hrq.ApplyForGin(router)
 
-	router.Use(hrq.MiddlewareForGin())
+
 	//hrq.ApplyForGin(router)
 
 	//
