@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	// import uuid
 )
 
 type reqrsq struct {
@@ -116,8 +115,13 @@ func (w *responseWriter) Pusher() (pusher http.Pusher) {
 }
 
 func init() {
+	mux.HandleFunc("/", ServeHTTP)
+}
+
+func Init(worker int, queueSize int) {
 	// http queue consumer
-	for i := 0; i < runtime.NumCPU()*10; i++ {
+	chanReqRsp = make(chan *reqrsq, queueSize)
+	for i := 0; i < worker; i++ {
 		go func() {
 			handler := func() {
 				defer func() {
@@ -157,17 +161,18 @@ func init() {
 
 		}()
 	}
-	//mux := http.NewServeMux()
-	mux.HandleFunc("/", ServeHTTP)
-
 }
 
 // define default http handler
 func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	once.Do(func() {
+		Init(runtime.NumCPU()*10, runtime.NumCPU()*100)
+	})
 	// define request response struct
 	//judge request is multipart/form-data
 	if r.Header.Get("Content-Type") == "multipart/form-data" {
 		//save request body to file
+
 	}
 	c := make(chan bool, 1)
 	reqRsp := &reqrsq{
@@ -193,6 +198,8 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
 var handlerMap = make(map[string]http.HandlerFunc)
 
 var lock sync.RWMutex
+
+var once sync.Once
 
 func Handle(method string, path string, handler http.HandlerFunc) {
 
@@ -245,14 +252,30 @@ func Router() *httprouter.Router {
 	return router
 }
 
-func ApplyForGin(ginEngine *gin.Engine) {
+func ApplyToGin(ginEngine *gin.Engine) {
 	lock.RLock()
 	defer lock.RUnlock()
-	for k, v := range handlerMap {
+	for k, _ := range handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
-			v(c.Writer, c.Request)
+			if handler,_,_:= router.Lookup(method, path);handler!=nil {
+				handler(c.Writer, c.Request, nil)
+			} else {
+				c.Writer.WriteHeader(http.StatusNotFound)
+			}
+		})
+	}
+}
+
+func ApplyFromGin(ginEngine *gin.Engine) {
+	for _, v := range ginEngine.Routes() {
+		Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
+			ctx := &gin.Context{}
+			r = r.WithContext(context.WithValue(r.Context(), gin.ContextKey, ctx))
+			ctx.Request = r
+			ctx.Writer = &responseWriter{ResponseWriter: w}
+			v.HandlerFunc(ctx)
 		})
 	}
 }

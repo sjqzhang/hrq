@@ -5,9 +5,8 @@ import (
 	"github.com/sjqzhang/hrq"
 	"io/ioutil"
 	"net/http"
-	"time"
 )
-
+//
 //func main() {
 //
 //
@@ -28,29 +27,17 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	gin.DefaultWriter = ioutil.Discard
 	router := gin.Default()
-
-	//
-	//hrq.GET("/x", func(w http.ResponseWriter, req *http.Request) {
-	//	w.Write([]byte("hello world  sdfasfasdfa"))
-	//})
-
-	hrq.GET("/xx", func(w http.ResponseWriter, req *http.Request) {
-		time.Sleep(time.Microsecond * 100)
-		w.Write([]byte("hello world  hrq"))
-	})
-
-	router.Use(hrq.MiddlewareForGin())
-
-	router.GET("/x", func(c *gin.Context) {
-		c.String(200, "hello world  xxxx")
-	})
-
+	router.Use(hrq.MiddlewareForGin())// 使用中间件以激活队列功能
 	hrq.GET("/hello", func(w http.ResponseWriter, req *http.Request) {
-		time.Sleep(time.Microsecond * 100)
-		w.Write([]byte("hello world  helllo"))
+		w.Write([]byte("hello world"))
 	})
 
-	hrq.ApplyToGin(router)
+	router.GET("/world", func(c *gin.Context) {
+		c.String(200, "world, hello ")
+	})
+	hrq.ApplyToGin(router) // 将hrq的路由应用到gin中
+
+
 
 	//hrq.ApplyFromGin(router)
 
@@ -73,3 +60,20 @@ func main() {
 
 	//fmt.Println(hrq.ListenAndServe(":8080"))
 }
+
+
+//package main
+//
+//import (
+//	"fmt"
+//	"net/http"
+//)
+//
+//func handler(writer http.ResponseWriter, request *http.Request) {
+//	fmt.Fprintf(writer, "Hello World!")
+//}
+//
+//func main() {
+//	http.HandleFunc("/", handler)
+//	http.ListenAndServe(":8080", nil)
+//}
