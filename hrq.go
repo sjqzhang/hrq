@@ -28,11 +28,38 @@ type reqrsq struct {
 }
 
 // define http request queue
-var chanReqRsp = make(chan *reqrsq, 1000)
+//var chanReqRsp = make(chan *reqrsq, 1000)
+//
+//var router = httprouter.New()
+//var mux = http.NewServeMux()
+//var tmpDir = "/tmp"
 
-var router = httprouter.New()
-var mux = http.NewServeMux()
-var tmpDir = "/tmp"
+type config struct {
+	// The number of goroutines that will be used to handle requests.
+	// If <= 0, then the number of CPUs will be used.
+	NumWorkers int
+	// The size of the queue that will be used to store requests.
+	// If <= 0, then the default value will be used.
+	QueueSize int
+	// TempDir is the directory to use for temporary files.
+	TempDir string
+}
+
+var Config = &config{
+	NumWorkers: runtime.NumCPU() * 10,
+	QueueSize:  runtime.NumCPU() * 100,
+	TempDir:    "/tmp",
+}
+
+type hrp struct {
+	once       sync.Once
+	mux        *http.ServeMux
+	chanReqRsp chan *reqrsq
+	router     *httprouter.Router
+	config     *config
+}
+
+var ghrp *hrp = New()
 
 const (
 	noWritten     = -1
@@ -121,14 +148,21 @@ func (w *responseWriter) Pusher() (pusher http.Pusher) {
 	return nil
 }
 
-func init() {
-	mux.HandleFunc("/", ServeHTTP)
+func New() *hrp {
+	h := &hrp{
+		mux:        http.NewServeMux(),
+		chanReqRsp: make(chan *reqrsq, 1000),
+		config:     Config,
+		router:     httprouter.New(),
+	}
+	h.mux.HandleFunc("/", h.ServeHTTP)
+	return h
 }
 
-func Init(worker int, queueSize int) {
+func (h *hrp) Init(worker int, queueSize int) {
 	// http queue consumer
-	chanReqRsp = make(chan *reqrsq, queueSize)
-	for i := 0; i < worker; i++ {
+	h.chanReqRsp = make(chan *reqrsq, h.config.QueueSize)
+	for i := 0; i < h.config.NumWorkers; i++ {
 		go func() {
 			handler := func() {
 				defer func() {
@@ -138,7 +172,7 @@ func Init(worker int, queueSize int) {
 				}()
 				for {
 					select {
-					case reqRsp := <-chanReqRsp:
+					case reqRsp := <-h.chanReqRsp:
 						hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
 						switch hrqCxt.(type) {
 						case *beecontext.Context:
@@ -156,7 +190,7 @@ func Init(worker int, queueSize int) {
 							c.Next()
 							reqRsp.done <- true
 						default:
-							hander, _, _ := router.Lookup(reqRsp.method, reqRsp.path)
+							hander, _, _ := h.router.Lookup(reqRsp.method, reqRsp.path)
 							if hander != nil {
 								hander(reqRsp.rsp, reqRsp.req, nil)
 								reqRsp.done <- true
@@ -179,17 +213,16 @@ func Init(worker int, queueSize int) {
 	}
 }
 
-
 // define default http handler
-func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *hrp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	once.Do(func() {
-		Init(runtime.NumCPU()*10, runtime.NumCPU()*100)
+		h.Init(h.config.NumWorkers, h.config.QueueSize)
 	})
 	// define request response struct
 	//judge request is multipart/form-data
 
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == "POST" && r.ContentLength > 1024*1024*4 {
-		tmpFile, err := ioutil.TempFile(tmpDir, "hrq_upload_")
+		tmpFile, err := ioutil.TempFile(h.config.TempDir, "hrq_upload_")
 		if err == nil {
 			defer tmpFile.Close()
 			defer os.Remove(tmpFile.Name())
@@ -210,7 +243,7 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		done:   c,
 	}
 	// push request response struct into queue
-	chanReqRsp <- reqRsp
+	h.chanReqRsp <- reqRsp
 	<-c
 }
 
@@ -227,55 +260,163 @@ var lock sync.RWMutex
 
 var once sync.Once
 
-func Handle(method string, path string, handler http.HandlerFunc) {
+func (h *hrp) Handle(method string, path string, handler http.HandlerFunc) {
 
 	lock.Lock()
 	defer lock.Unlock()
 	handlerMap[method+"$"+path] = handler
 
-	h := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	hl := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		handler(w, r)
 	}
-	router.Handle(method, path, h)
+	h.router.Handle(method, path, hl)
 }
 
 // GET is a shortcut for router.Handle(http.MethodGet, path, handle)
+func (h *hrp) GET(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodGet, path, handle)
+}
+
+// HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
+func (h *hrp) HEAD(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodHead, path, handle)
+}
+
+// OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
+func (h *hrp) OPTIONS(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodOptions, path, handle)
+}
+
+// POST is a shortcut for router.Handle(http.MethodPost, path, handle)
+func (h *hrp) POST(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodPost, path, handle)
+}
+
+// PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
+func (h *hrp) PUT(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodPut, path, handle)
+}
+
+// PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
+func (h *hrp) PATCH(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodPatch, path, handle)
+}
+
+// DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
+func (h *hrp) DELETE(path string, handle http.HandlerFunc) {
+	h.Handle(http.MethodDelete, path, handle)
+}
+
+func (h *hrp) Router() *httprouter.Router {
+	return h.router
+}
+
+func (h *hrp) ApplyToGin(ginEngine *gin.Engine) {
+	lock.RLock()
+	defer lock.RUnlock()
+	for k, _ := range handlerMap {
+		method := strings.Split(k, "$")[0]
+		path := strings.Split(k, "$")[1]
+		ginEngine.Handle(method, path, func(c *gin.Context) {
+			if handler, _, _ := h.router.Lookup(method, path); handler != nil {
+				handler(c.Writer, c.Request, nil)
+			} else {
+				c.Writer.WriteHeader(http.StatusNotFound)
+			}
+		})
+	}
+}
+
+func (h *hrp) ApplyToBeego(server *web.HttpServer) {
+	lock.RLock()
+	defer lock.RUnlock()
+	for k, _ := range handlerMap {
+		method := strings.Split(k, "$")[0]
+		path := strings.Split(k, "$")[1]
+		server.Handlers.AddMethod(method, path, func(ctx *beecontext.Context) {
+			if handler, _, _ := h.router.Lookup(method, path); handler != nil {
+				handler(ctx.ResponseWriter, ctx.Request, nil)
+			} else {
+				ctx.ResponseWriter.WriteHeader(http.StatusNotFound)
+			}
+		})
+	}
+}
+
+func (h *hrp) ApplyFromGin(ginEngine *gin.Engine) {
+	for _, v := range ginEngine.Routes() {
+		h.Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
+			ctx := &gin.Context{}
+			r = r.WithContext(context.WithValue(r.Context(), hrqContextKey, ctx))
+			ctx.Request = r
+			ctx.Writer = &responseWriter{ResponseWriter: w}
+			v.HandlerFunc(ctx)
+		})
+	}
+}
+
+func (h *hrp) MiddlewareForGin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
+		h.ServeHTTP(c.Writer, req)
+	}
+}
+
+func (h *hrp) InstallFilterChanForBeego() {
+	web.InsertFilterChain("/*", func(next web.FilterFunc) web.FilterFunc {
+		return func(ctx *beecontext.Context) {
+			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
+			c = context.WithValue(c, hrqFilterNext, next)
+			ctx.Request = ctx.Request.WithContext(c)
+			h.ServeHTTP(ctx.ResponseWriter, ctx.Request)
+			next(ctx)
+		}
+	})
+}
+
+func (h *hrp) ListenAndServe(addr string) error {
+
+	return http.ListenAndServe(addr, h.mux)
+}
+
+// global
+
 func GET(path string, handle http.HandlerFunc) {
-	Handle(http.MethodGet, path, handle)
+	ghrp.Handle(http.MethodGet, path, handle)
 }
 
 // HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
 func HEAD(path string, handle http.HandlerFunc) {
-	Handle(http.MethodHead, path, handle)
+	ghrp.Handle(http.MethodHead, path, handle)
 }
 
 // OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
 func OPTIONS(path string, handle http.HandlerFunc) {
-	Handle(http.MethodOptions, path, handle)
+	ghrp.Handle(http.MethodOptions, path, handle)
 }
 
 // POST is a shortcut for router.Handle(http.MethodPost, path, handle)
 func POST(path string, handle http.HandlerFunc) {
-	Handle(http.MethodPost, path, handle)
+	ghrp.Handle(http.MethodPost, path, handle)
 }
 
 // PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
 func PUT(path string, handle http.HandlerFunc) {
-	Handle(http.MethodPut, path, handle)
+	ghrp.Handle(http.MethodPut, path, handle)
 }
 
 // PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
 func PATCH(path string, handle http.HandlerFunc) {
-	Handle(http.MethodPatch, path, handle)
+	ghrp.Handle(http.MethodPatch, path, handle)
 }
 
 // DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
 func DELETE(path string, handle http.HandlerFunc) {
-	Handle(http.MethodDelete, path, handle)
+	ghrp.Handle(http.MethodDelete, path, handle)
 }
 
 func Router() *httprouter.Router {
-	return router
+	return ghrp.router
 }
 
 func ApplyToGin(ginEngine *gin.Engine) {
@@ -285,7 +426,7 @@ func ApplyToGin(ginEngine *gin.Engine) {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
-			if handler, _, _ := router.Lookup(method, path); handler != nil {
+			if handler, _, _ := ghrp.router.Lookup(method, path); handler != nil {
 				handler(c.Writer, c.Request, nil)
 			} else {
 				c.Writer.WriteHeader(http.StatusNotFound)
@@ -301,7 +442,7 @@ func ApplyToBeego(server *web.HttpServer) {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		server.Handlers.AddMethod(method, path, func(ctx *beecontext.Context) {
-			if handler, _, _ := router.Lookup(method, path); handler != nil {
+			if handler, _, _ := ghrp.router.Lookup(method, path); handler != nil {
 				handler(ctx.ResponseWriter, ctx.Request, nil)
 			} else {
 				ctx.ResponseWriter.WriteHeader(http.StatusNotFound)
@@ -312,7 +453,7 @@ func ApplyToBeego(server *web.HttpServer) {
 
 func ApplyFromGin(ginEngine *gin.Engine) {
 	for _, v := range ginEngine.Routes() {
-		Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
+		ghrp.Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
 			ctx := &gin.Context{}
 			r = r.WithContext(context.WithValue(r.Context(), hrqContextKey, ctx))
 			ctx.Request = r
@@ -325,7 +466,7 @@ func ApplyFromGin(ginEngine *gin.Engine) {
 func MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
-		ServeHTTP(c.Writer, req)
+		ghrp.ServeHTTP(c.Writer, req)
 	}
 }
 
@@ -335,13 +476,12 @@ func InstallFilterChanForBeego() {
 			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
 			c = context.WithValue(c, hrqFilterNext, next)
 			ctx.Request = ctx.Request.WithContext(c)
-			ServeHTTP(ctx.ResponseWriter, ctx.Request)
+			ghrp.ServeHTTP(ctx.ResponseWriter, ctx.Request)
 			next(ctx)
 		}
 	})
 }
 
 func ListenAndServe(addr string) error {
-
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, ghrp.mux)
 }
