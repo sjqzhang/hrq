@@ -11,8 +11,8 @@ go get github.com/sjqzhang/hrq
 ## Basic Setup
 
 ```go
-// hrq.Init(worker int, queueSize int)
-hrq.Init(100, 1000) // 想获得更好性能时需手动设置worker和queueSize，否则默认为cpu*10和cpu*100
+hrq.Conf.Workers = 100
+hrq.Conf.MaxQueueSize = 1000
 ```
 
 ## Basic Usage
@@ -64,4 +64,36 @@ func main() {
 	router.Run(":8080")
 }
 
+```
+
+## integration with beego
+
+```go
+
+package main
+
+import (
+	"fmt"
+	"github.com/beego/beego/v2/server/web"
+	"github.com/beego/beego/v2/server/web/context"
+	"github.com/sjqzhang/hrq"
+	"net/http"
+)
+
+
+func main() {
+	hrq.Conf.Workers = 100
+	hrq.Conf.MaxQueueSize = 1000
+	hrq.GET("/hello", func(w http.ResponseWriter, req *http.Request) {
+		fmt.Println(req.Context())
+		w.Write([]byte("hello world, from hrq"))
+	})
+	web.BeeApp.Handlers.AddMethod("GET", "/hello2", func(ctx *context.Context) {
+		ctx.WriteString("hello2 world, from beego")
+	})
+	hrq.InstallFilterChanForBeego()
+	hrq.ApplyToBeego(web.BeeApp)
+	web.Run()
+
+}
 ```
