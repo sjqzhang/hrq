@@ -3,6 +3,7 @@ package hrq
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"github.com/beego/beego/v2/server/web"
 	beecontext "github.com/beego/beego/v2/server/web/context"
 	"github.com/gin-gonic/gin"
@@ -17,12 +18,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 type reqrsq struct {
 	uuid   string
 	path   string
 	method string
+	begin  int64
 	req    *http.Request
 	rsp    http.ResponseWriter
 	done   chan bool
@@ -44,12 +47,20 @@ type Config struct {
 	MaxQueueSize int
 	// TempDir is the directory to use for temporary files.
 	TempDir string
+	// TimeoutQueue is the maximum duration before timing out read of the request.
+	// If TimeoutQueue is zero, no timeout is set.
+	TimeoutQueue int64
+	// TimeoutProcess is the maximum duration before timing out processing of the request.
+	// If TimeoutProcess is zero, no timeout is set.
+	TimeoutProcess int64
 }
 
 var Conf = &Config{
-	Workers:      runtime.NumCPU() * 10,
-	MaxQueueSize: runtime.NumCPU() * 100,
-	TempDir:      "/tmp",
+	Workers:        runtime.NumCPU() * 10,
+	MaxQueueSize:   runtime.NumCPU() * 100,
+	TimeoutProcess: 0,
+	TimeoutQueue:   0,
+	TempDir:        "/tmp",
 }
 
 type hrq struct {
@@ -178,6 +189,24 @@ func (h *hrq) Init(worker int, queueSize int) {
 				for {
 					select {
 					case reqRsp := <-h.chanReqRsp:
+
+						if h.config.TimeoutQueue > 0 && time.Now().UnixNano()-reqRsp.begin > h.config.TimeoutQueue {
+							reqRsp.rsp.WriteHeader(http.StatusRequestTimeout)
+							reqRsp.done <- true
+							break
+						}
+						//if h.config.TimeoutProcess > 0 {
+						//	go func() {
+						//		select {
+						//		case <-reqRsp.req.Context().Done():
+						//			reqRsp.rsp.WriteHeader(http.StatusRequestTimeout)
+						//			reqRsp.done <- true
+						//			break
+						//		case <-reqRsp.done:
+						//			break
+						//		}
+						//	}()
+						//}
 						hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
 						switch hrqCxt.(type) {
 						case *beecontext.Context:
@@ -203,7 +232,6 @@ func (h *hrq) Init(worker int, queueSize int) {
 							}
 							reqRsp.done <- true
 
-							reqRsp.done <- true
 						default:
 							hander, _, _ := h.router.Lookup(reqRsp.method, reqRsp.path)
 							if hander != nil {
@@ -216,8 +244,8 @@ func (h *hrq) Init(worker int, queueSize int) {
 							}
 
 						}
-
 					}
+
 				}
 			}
 			for {
@@ -230,6 +258,9 @@ func (h *hrq) Init(worker int, queueSize int) {
 
 // define default http handler
 func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	fmt.Println(runtime.NumGoroutine())
+
 	once.Do(func() {
 		h.Init(h.config.Workers, h.config.MaxQueueSize)
 	})
@@ -250,6 +281,7 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	c := make(chan bool, 1)
 	reqRsp := &reqrsq{
+		begin:  time.Now().UnixMilli(),
 		uuid:   "uuid",
 		path:   r.URL.Path,
 		method: r.Method,
@@ -257,9 +289,15 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rsp:    w,
 		done:   c,
 	}
+	if h.config.TimeoutProcess > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.config.TimeoutProcess)*time.Millisecond)
+		reqRsp.req = r.WithContext(ctx)
+		defer cancel()
+	}
 	// push request response struct into queue
 	h.chanReqRsp <- reqRsp
 	<-c
+	//close(c)
 }
 
 //// gen uuid
@@ -358,7 +396,7 @@ func (h *hrq) ApplyToBeego(server *web.HttpServer) {
 	}
 }
 
-func (h *hrq)ApplyToEcho(e *echo.Echo) {
+func (h *hrq) ApplyToEcho(e *echo.Echo) {
 	lock.RLock()
 	defer lock.RUnlock()
 	for k, _ := range handlerMap {
@@ -507,7 +545,7 @@ func MiddlewareForEcho() echo.MiddlewareFunc {
 		return func(ctx echo.Context) error {
 			c := context.WithValue(ctx.Request().Context(), hrqContextKey, ctx)
 			c = context.WithValue(c, hrqFilterNext, next)
-			ctx.SetRequest( ctx.Request().WithContext(c))
+			ctx.SetRequest(ctx.Request().WithContext(c))
 			ghrp.ServeHTTP(ctx.Response().Writer, ctx.Request())
 			return nil
 		}
