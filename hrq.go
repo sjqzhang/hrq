@@ -3,6 +3,8 @@ package hrq
 import (
 	"bufio"
 	"context"
+	"github.com/beego/beego/v2/server/web"
+	beecontext "github.com/beego/beego/v2/server/web/context"
 	"github.com/gin-gonic/gin"
 	"github.com/julienschmidt/httprouter"
 	"io"
@@ -35,6 +37,8 @@ var tmpDir = "/tmp"
 const (
 	noWritten     = -1
 	defaultStatus = http.StatusOK
+	hrqContextKey = "hrqContextKey"
+	hrqFilterNext = "hrqFilterNext"
 )
 
 type responseWriter struct {
@@ -135,14 +139,23 @@ func Init(worker int, queueSize int) {
 				for {
 					select {
 					case reqRsp := <-chanReqRsp:
-						ctx := reqRsp.req.Context().Value(gin.ContextKey)
-						if ctx != nil {
-							c := ctx.(*gin.Context)
+						hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
+						switch hrqCxt.(type) {
+						case *beecontext.Context:
+							c := hrqCxt.(*beecontext.Context)
+							next := reqRsp.req.Context().Value(hrqFilterNext)
+							if next != nil {
+								next.(web.FilterFunc)(c)
+							}
+							reqRsp.done <- true
+
+						case *gin.Context:
+							c := hrqCxt.(*gin.Context)
 							c.Request = reqRsp.req
 							c.Writer = &responseWriter{ResponseWriter: reqRsp.rsp}
 							c.Next()
 							reqRsp.done <- true
-						} else {
+						default:
 							hander, _, _ := router.Lookup(reqRsp.method, reqRsp.path)
 							if hander != nil {
 								hander(reqRsp.rsp, reqRsp.req, nil)
@@ -152,19 +165,20 @@ func Init(worker int, queueSize int) {
 								reqRsp.rsp.Write([]byte("not found"))
 								reqRsp.done <- true
 							}
+
 						}
+
 					}
 				}
-
 			}
-
 			for {
 				handler()
 			}
-
 		}()
+
 	}
 }
+
 
 // define default http handler
 func ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -280,11 +294,27 @@ func ApplyToGin(ginEngine *gin.Engine) {
 	}
 }
 
+func ApplyToBeego(server *web.HttpServer) {
+	lock.RLock()
+	defer lock.RUnlock()
+	for k, _ := range handlerMap {
+		method := strings.Split(k, "$")[0]
+		path := strings.Split(k, "$")[1]
+		server.Handlers.AddMethod(method, path, func(ctx *beecontext.Context) {
+			if handler, _, _ := router.Lookup(method, path); handler != nil {
+				handler(ctx.ResponseWriter, ctx.Request, nil)
+			} else {
+				ctx.ResponseWriter.WriteHeader(http.StatusNotFound)
+			}
+		})
+	}
+}
+
 func ApplyFromGin(ginEngine *gin.Engine) {
 	for _, v := range ginEngine.Routes() {
 		Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
 			ctx := &gin.Context{}
-			r = r.WithContext(context.WithValue(r.Context(), gin.ContextKey, ctx))
+			r = r.WithContext(context.WithValue(r.Context(), hrqContextKey, ctx))
 			ctx.Request = r
 			ctx.Writer = &responseWriter{ResponseWriter: w}
 			v.HandlerFunc(ctx)
@@ -294,9 +324,21 @@ func ApplyFromGin(ginEngine *gin.Engine) {
 
 func MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		req := c.Request.WithContext(context.WithValue(c.Request.Context(), gin.ContextKey, c))
+		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
 		ServeHTTP(c.Writer, req)
 	}
+}
+
+func InstallFilterChanForBeego() {
+	web.InsertFilterChain("/*", func(next web.FilterFunc) web.FilterFunc {
+		return func(ctx *beecontext.Context) {
+			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
+			c = context.WithValue(c, hrqFilterNext, next)
+			ctx.Request = ctx.Request.WithContext(c)
+			ServeHTTP(ctx.ResponseWriter, ctx.Request)
+			next(ctx)
+		}
+	})
 }
 
 func ListenAndServe(addr string) error {
