@@ -34,32 +34,32 @@ type reqrsq struct {
 //var mux = http.NewServeMux()
 //var tmpDir = "/tmp"
 
-type config struct {
+type Config struct {
 	// The number of goroutines that will be used to handle requests.
 	// If <= 0, then the number of CPUs will be used.
-	NumWorkers int
+	Workers int
 	// The size of the queue that will be used to store requests.
 	// If <= 0, then the default value will be used.
-	QueueSize int
+	MaxQueueSize int
 	// TempDir is the directory to use for temporary files.
 	TempDir string
 }
 
-var Config = &config{
-	NumWorkers: runtime.NumCPU() * 10,
-	QueueSize:  runtime.NumCPU() * 100,
-	TempDir:    "/tmp",
+var Conf = &Config{
+	Workers:      runtime.NumCPU() * 10,
+	MaxQueueSize: runtime.NumCPU() * 100,
+	TempDir:      "/tmp",
 }
 
-type hrp struct {
+type hrq struct {
 	once       sync.Once
 	mux        *http.ServeMux
 	chanReqRsp chan *reqrsq
 	router     *httprouter.Router
-	config     *config
+	config     *Config
 }
 
-var ghrp *hrp = New()
+var ghrp *hrq = New(Conf)
 
 const (
 	noWritten     = -1
@@ -148,21 +148,25 @@ func (w *responseWriter) Pusher() (pusher http.Pusher) {
 	return nil
 }
 
-func New() *hrp {
-	h := &hrp{
+func New(conf *Config) *hrq {
+	if conf == nil {
+		conf = Conf
+	}
+	h := &hrq{
 		mux:        http.NewServeMux(),
 		chanReqRsp: make(chan *reqrsq, 1000),
-		config:     Config,
+		config:     conf,
+		once:       sync.Once{},
 		router:     httprouter.New(),
 	}
 	h.mux.HandleFunc("/", h.ServeHTTP)
 	return h
 }
 
-func (h *hrp) Init(worker int, queueSize int) {
+func (h *hrq) Init(worker int, queueSize int) {
 	// http queue consumer
-	h.chanReqRsp = make(chan *reqrsq, h.config.QueueSize)
-	for i := 0; i < h.config.NumWorkers; i++ {
+	h.chanReqRsp = make(chan *reqrsq, h.config.MaxQueueSize)
+	for i := 0; i < h.config.Workers; i++ {
 		go func() {
 			handler := func() {
 				defer func() {
@@ -214,9 +218,9 @@ func (h *hrp) Init(worker int, queueSize int) {
 }
 
 // define default http handler
-func (h *hrp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	once.Do(func() {
-		h.Init(h.config.NumWorkers, h.config.QueueSize)
+		h.Init(h.config.Workers, h.config.MaxQueueSize)
 	})
 	// define request response struct
 	//judge request is multipart/form-data
@@ -260,7 +264,7 @@ var lock sync.RWMutex
 
 var once sync.Once
 
-func (h *hrp) Handle(method string, path string, handler http.HandlerFunc) {
+func (h *hrq) Handle(method string, path string, handler http.HandlerFunc) {
 
 	lock.Lock()
 	defer lock.Unlock()
@@ -273,45 +277,45 @@ func (h *hrp) Handle(method string, path string, handler http.HandlerFunc) {
 }
 
 // GET is a shortcut for router.Handle(http.MethodGet, path, handle)
-func (h *hrp) GET(path string, handle http.HandlerFunc) {
+func (h *hrq) GET(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodGet, path, handle)
 }
 
 // HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
-func (h *hrp) HEAD(path string, handle http.HandlerFunc) {
+func (h *hrq) HEAD(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodHead, path, handle)
 }
 
 // OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
-func (h *hrp) OPTIONS(path string, handle http.HandlerFunc) {
+func (h *hrq) OPTIONS(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodOptions, path, handle)
 }
 
 // POST is a shortcut for router.Handle(http.MethodPost, path, handle)
-func (h *hrp) POST(path string, handle http.HandlerFunc) {
+func (h *hrq) POST(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodPost, path, handle)
 }
 
 // PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
-func (h *hrp) PUT(path string, handle http.HandlerFunc) {
+func (h *hrq) PUT(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodPut, path, handle)
 }
 
 // PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
-func (h *hrp) PATCH(path string, handle http.HandlerFunc) {
+func (h *hrq) PATCH(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodPatch, path, handle)
 }
 
 // DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
-func (h *hrp) DELETE(path string, handle http.HandlerFunc) {
+func (h *hrq) DELETE(path string, handle http.HandlerFunc) {
 	h.Handle(http.MethodDelete, path, handle)
 }
 
-func (h *hrp) Router() *httprouter.Router {
+func (h *hrq) Router() *httprouter.Router {
 	return h.router
 }
 
-func (h *hrp) ApplyToGin(ginEngine *gin.Engine) {
+func (h *hrq) ApplyToGin(ginEngine *gin.Engine) {
 	lock.RLock()
 	defer lock.RUnlock()
 	for k, _ := range handlerMap {
@@ -327,7 +331,7 @@ func (h *hrp) ApplyToGin(ginEngine *gin.Engine) {
 	}
 }
 
-func (h *hrp) ApplyToBeego(server *web.HttpServer) {
+func (h *hrq) ApplyToBeego(server *web.HttpServer) {
 	lock.RLock()
 	defer lock.RUnlock()
 	for k, _ := range handlerMap {
@@ -343,7 +347,7 @@ func (h *hrp) ApplyToBeego(server *web.HttpServer) {
 	}
 }
 
-func (h *hrp) ApplyFromGin(ginEngine *gin.Engine) {
+func (h *hrq) ApplyFromGin(ginEngine *gin.Engine) {
 	for _, v := range ginEngine.Routes() {
 		h.Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
 			ctx := &gin.Context{}
@@ -355,14 +359,14 @@ func (h *hrp) ApplyFromGin(ginEngine *gin.Engine) {
 	}
 }
 
-func (h *hrp) MiddlewareForGin() gin.HandlerFunc {
+func (h *hrq) MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
 		h.ServeHTTP(c.Writer, req)
 	}
 }
 
-func (h *hrp) InstallFilterChanForBeego() {
+func (h *hrq) InstallFilterChanForBeego() {
 	web.InsertFilterChain("/*", func(next web.FilterFunc) web.FilterFunc {
 		return func(ctx *beecontext.Context) {
 			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
@@ -374,7 +378,7 @@ func (h *hrp) InstallFilterChanForBeego() {
 	})
 }
 
-func (h *hrp) ListenAndServe(addr string) error {
+func (h *hrq) ListenAndServe(addr string) error {
 
 	return http.ListenAndServe(addr, h.mux)
 }
