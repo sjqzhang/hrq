@@ -6,9 +6,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/julienschmidt/httprouter"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,6 +30,7 @@ var chanReqRsp = make(chan *reqrsq, 1000)
 
 var router = httprouter.New()
 var mux = http.NewServeMux()
+var tmpDir = "/tmp"
 
 const (
 	noWritten     = -1
@@ -170,9 +173,18 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	// define request response struct
 	//judge request is multipart/form-data
-	if r.Header.Get("Content-Type") == "multipart/form-data" {
-		//save request body to file
 
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == "POST" && r.ContentLength > 1024*1024*4 {
+		tmpFile, err := ioutil.TempFile(tmpDir, "hrq_upload_")
+		if err == nil {
+			defer tmpFile.Close()
+			defer os.Remove(tmpFile.Name())
+			_, err = io.Copy(tmpFile, r.Body)
+			if err == nil {
+				r.Body.Close()
+				r.Body, err = os.Open(tmpFile.Name())
+			}
+		}
 	}
 	c := make(chan bool, 1)
 	reqRsp := &reqrsq{
@@ -259,7 +271,7 @@ func ApplyToGin(ginEngine *gin.Engine) {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
-			if handler,_,_:= router.Lookup(method, path);handler!=nil {
+			if handler, _, _ := router.Lookup(method, path); handler != nil {
 				handler(c.Writer, c.Request, nil)
 			} else {
 				c.Writer.WriteHeader(http.StatusNotFound)
