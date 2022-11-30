@@ -7,6 +7,7 @@ import (
 	beecontext "github.com/beego/beego/v2/server/web/context"
 	"github.com/gin-gonic/gin"
 	"github.com/julienschmidt/httprouter"
+	"github.com/labstack/echo/v4"
 	"io"
 	"io/ioutil"
 	"log"
@@ -193,6 +194,16 @@ func (h *hrq) Init(worker int, queueSize int) {
 							c.Writer = &responseWriter{ResponseWriter: reqRsp.rsp}
 							c.Next()
 							reqRsp.done <- true
+
+						case echo.Context:
+							c := hrqCxt.(echo.Context)
+							next := reqRsp.req.Context().Value(hrqFilterNext)
+							if next != nil {
+								next.(echo.HandlerFunc)(c)
+							}
+							reqRsp.done <- true
+
+							reqRsp.done <- true
 						default:
 							hander, _, _ := h.router.Lookup(reqRsp.method, reqRsp.path)
 							if hander != nil {
@@ -347,6 +358,23 @@ func (h *hrq) ApplyToBeego(server *web.HttpServer) {
 	}
 }
 
+func (h *hrq)ApplyToEcho(e *echo.Echo) {
+	lock.RLock()
+	defer lock.RUnlock()
+	for k, _ := range handlerMap {
+		method := strings.Split(k, "$")[0]
+		path := strings.Split(k, "$")[1]
+		e.Add(method, path, func(c echo.Context) error {
+			if handler, _, _ := h.router.Lookup(method, path); handler != nil {
+				handler(c.Response().Writer, c.Request(), nil)
+			} else {
+				c.Response().WriteHeader(http.StatusNotFound)
+			}
+			return nil
+		})
+	}
+}
+
 func (h *hrq) ApplyFromGin(ginEngine *gin.Engine) {
 	for _, v := range ginEngine.Routes() {
 		h.Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -471,6 +499,35 @@ func MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
 		ghrp.ServeHTTP(c.Writer, req)
+	}
+}
+
+func MiddlewareForEcho() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(ctx echo.Context) error {
+			c := context.WithValue(ctx.Request().Context(), hrqContextKey, ctx)
+			c = context.WithValue(c, hrqFilterNext, next)
+			ctx.SetRequest( ctx.Request().WithContext(c))
+			ghrp.ServeHTTP(ctx.Response().Writer, ctx.Request())
+			return nil
+		}
+	}
+}
+
+func ApplyToEcho(e *echo.Echo) {
+	lock.RLock()
+	defer lock.RUnlock()
+	for k, _ := range handlerMap {
+		method := strings.Split(k, "$")[0]
+		path := strings.Split(k, "$")[1]
+		e.Add(method, path, func(c echo.Context) error {
+			if handler, _, _ := ghrp.router.Lookup(method, path); handler != nil {
+				handler(c.Response().Writer, c.Request(), nil)
+			} else {
+				c.Response().WriteHeader(http.StatusNotFound)
+			}
+			return nil
+		})
 	}
 }
 
