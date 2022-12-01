@@ -30,6 +30,11 @@ type reqrsq struct {
 	done   chan bool
 }
 
+type adapter interface {
+	Abort()
+	Next() error
+}
+
 // define http request queue
 //var chanReqRsp = make(chan *reqrsq, 1000)
 //
@@ -203,7 +208,80 @@ func New(conf *Config) *hrq {
 	return h
 }
 
+type defaultAdapter struct {
+	ctx    context.Context
+	hrq    *hrq
+	reqRsp *reqrsq
+}
+
+func (d *defaultAdapter) Abort() {
+	panic("implement me")
+}
+
+func (d *defaultAdapter) Next() error {
+	hander, _, _ := d.hrq.router.Lookup(d.reqRsp.method, d.reqRsp.path)
+	if hander != nil {
+		hander(d.reqRsp.rsp, d.reqRsp.req, nil)
+		d.reqRsp.done <- true
+	} else {
+		d.reqRsp.rsp.WriteHeader(http.StatusNotFound)
+		d.reqRsp.rsp.Write([]byte("not found"))
+		d.reqRsp.done <- true
+	}
+	return nil
+}
+
+var _ adapter = (*defaultAdapter)(nil)
+
+func (h *hrq) getAdapter(ctx interface{}, reqRsp *reqrsq, hrq *hrq) adapter {
+	switch ctx.(type) {
+	case *gin.Context:
+		return &ginAdapter{ctx.(*gin.Context), hrq, reqRsp}
+	case *beecontext.Context:
+		return &beegoAdapter{ctx.(*beecontext.Context), hrq, reqRsp}
+	case echo.Context:
+		return &echoAdapter{ctx.(echo.Context), hrq, reqRsp}
+	default:
+		return &defaultAdapter{ctx.(context.Context), hrq, reqRsp}
+	}
+}
+
 func (h *hrq) initHrq(worker int, queueSize int) {
+	// http queue consumer
+	go h.initStat()
+	h.chanReqRsp = make(chan *reqrsq, h.config.MaxQueueSize)
+	for i := 0; i < h.config.Workers; i++ {
+		go func() {
+			handler := func() {
+				defer func() {
+					if err := recover(); err != nil {
+						log.Println(err) //log
+					}
+				}()
+				for {
+					select {
+					case reqRsp := <-h.chanReqRsp:
+						hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
+						if hrqCxt == nil {
+							hrqCxt = reqRsp.req.Context()
+						}
+						apt := h.getAdapter(hrqCxt, reqRsp, h)
+						apt.Next()
+						reqRsp.done <- true
+
+					}
+
+				}
+			}
+			for {
+				handler()
+			}
+		}()
+
+	}
+}
+
+func (h *hrq) initHrq2(worker int, queueSize int) {
 	// http queue consumer
 	go h.initStat()
 	h.chanReqRsp = make(chan *reqrsq, h.config.MaxQueueSize)
