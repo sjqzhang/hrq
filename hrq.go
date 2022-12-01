@@ -3,7 +3,6 @@ package hrq
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"github.com/beego/beego/v2/server/web"
 	beecontext "github.com/beego/beego/v2/server/web/context"
 	"github.com/gin-gonic/gin"
@@ -53,23 +52,39 @@ type Config struct {
 	// TimeoutProcess is the maximum duration before timing out processing of the request.
 	// If TimeoutProcess is zero, no timeout is set.
 	TimeoutProcess int64
+
+	// MaxConnection
+	MaxConnection int
 }
 
 var Conf = &Config{
 	Workers:        runtime.NumCPU() * 10,
 	MaxQueueSize:   runtime.NumCPU() * 100,
+	MaxConnection:  1000,
 	TimeoutProcess: 0,
 	TimeoutQueue:   0,
 	TempDir:        "/tmp",
 }
 
 type hrq struct {
-	once       sync.Once
-	mux        *http.ServeMux
-	chanReqRsp chan *reqrsq
-	router     *httprouter.Router
-	config     *Config
+	handlerLock sync.RWMutex
+	handlerMap  map[string]http.HandlerFunc
+	once        sync.Once
+	mux         *http.ServeMux
+	chanReqRsp  chan *reqrsq
+	router      *httprouter.Router
+	config      *Config
+	chanReqInfo chan reqTimeInfo
+	statLock    sync.Mutex
+	statMap     map[string]*stat
+	maxConn     chan struct{}
 }
+
+//var handlerMap = make(map[string]http.HandlerFunc)
+//
+//var handlerLock sync.RWMutex
+//
+//var once sync.Once
 
 var ghrp *hrq = New(Conf)
 
@@ -164,19 +179,33 @@ func New(conf *Config) *hrq {
 	if conf == nil {
 		conf = Conf
 	}
+	if conf.Workers <= 0 {
+		conf.Workers = runtime.NumCPU() * 10
+	}
+	if conf.MaxQueueSize <= 0 {
+		conf.MaxQueueSize = runtime.NumCPU() * 100
+	}
+	if conf.MaxConnection <= 0 {
+		conf.MaxConnection = 1000
+	}
 	h := &hrq{
-		mux:        http.NewServeMux(),
-		chanReqRsp: make(chan *reqrsq, 1000),
-		config:     conf,
-		once:       sync.Once{},
-		router:     httprouter.New(),
+		mux:         http.NewServeMux(),
+		chanReqRsp:  make(chan *reqrsq, conf.MaxQueueSize),
+		config:      conf,
+		once:        sync.Once{},
+		router:      httprouter.New(),
+		statMap:     make(map[string]*stat),
+		chanReqInfo: make(chan reqTimeInfo, 10000),
+		handlerMap:  make(map[string]http.HandlerFunc),
+		maxConn:     make(chan struct{}, conf.MaxConnection),
 	}
 	h.mux.HandleFunc("/", h.ServeHTTP)
 	return h
 }
 
-func (h *hrq) Init(worker int, queueSize int) {
+func (h *hrq) initHrq(worker int, queueSize int) {
 	// http queue consumer
+	go h.initStat()
 	h.chanReqRsp = make(chan *reqrsq, h.config.MaxQueueSize)
 	for i := 0; i < h.config.Workers; i++ {
 		go func() {
@@ -258,11 +287,13 @@ func (h *hrq) Init(worker int, queueSize int) {
 
 // define default http handler
 func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.maxConn <- struct{}{}
+	defer func() {
+		<-h.maxConn
+	}()
 
-	fmt.Println(runtime.NumGoroutine())
-
-	once.Do(func() {
-		h.Init(h.config.Workers, h.config.MaxQueueSize)
+	h.once.Do(func() {
+		h.initHrq(h.config.Workers, h.config.MaxQueueSize)
 	})
 	// define request response struct
 	//judge request is multipart/form-data
@@ -289,14 +320,21 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rsp:    w,
 		done:   c,
 	}
-	if h.config.TimeoutProcess > 0 {
-		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.config.TimeoutProcess)*time.Millisecond)
-		reqRsp.req = r.WithContext(ctx)
-		defer cancel()
+	ri := reqTimeInfo{
+		StartTime: time.Now().UnixMilli(),
+		Path:      r.URL.Path,
 	}
-	// push request response struct into queue
+	//if h.config.TimeoutProcess > 0 {
+	//	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.config.TimeoutProcess)*time.Millisecond)
+	//	reqRsp.req = r.WithContext(ctx)
+	//	defer cancel()
+	//}
+
 	h.chanReqRsp <- reqRsp
-	<-c
+	<-reqRsp.done
+	ri.EndTime = time.Now().UnixMilli()
+	h.chanReqInfo <- ri
+
 	//close(c)
 }
 
@@ -307,17 +345,11 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //
 //}
 
-var handlerMap = make(map[string]http.HandlerFunc)
-
-var lock sync.RWMutex
-
-var once sync.Once
-
 func (h *hrq) Handle(method string, path string, handler http.HandlerFunc) {
 
-	lock.Lock()
-	defer lock.Unlock()
-	handlerMap[method+"$"+path] = handler
+	h.handlerLock.Lock()
+	defer h.handlerLock.Unlock()
+	h.handlerMap[method+"$"+path] = handler
 
 	hl := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		handler(w, r)
@@ -365,9 +397,9 @@ func (h *hrq) Router() *httprouter.Router {
 }
 
 func (h *hrq) ApplyToGin(ginEngine *gin.Engine) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	h.handlerLock.RLock()
+	defer h.handlerLock.RUnlock()
+	for k, _ := range h.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
@@ -381,9 +413,9 @@ func (h *hrq) ApplyToGin(ginEngine *gin.Engine) {
 }
 
 func (h *hrq) ApplyToBeego(server *web.HttpServer) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	h.handlerLock.RLock()
+	defer h.handlerLock.RUnlock()
+	for k, _ := range h.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		server.Handlers.AddMethod(method, path, func(ctx *beecontext.Context) {
@@ -397,9 +429,9 @@ func (h *hrq) ApplyToBeego(server *web.HttpServer) {
 }
 
 func (h *hrq) ApplyToEcho(e *echo.Echo) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	h.handlerLock.RLock()
+	defer h.handlerLock.RUnlock()
+	for k, _ := range h.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		e.Add(method, path, func(c echo.Context) error {
@@ -490,9 +522,9 @@ func Router() *httprouter.Router {
 }
 
 func ApplyToGin(ginEngine *gin.Engine) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	ghrp.handlerLock.RLock()
+	defer ghrp.handlerLock.RUnlock()
+	for k, _ := range ghrp.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
@@ -506,9 +538,9 @@ func ApplyToGin(ginEngine *gin.Engine) {
 }
 
 func ApplyToBeego(server *web.HttpServer) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	ghrp.handlerLock.RLock()
+	defer ghrp.handlerLock.RUnlock()
+	for k, _ := range ghrp.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		server.Handlers.AddMethod(method, path, func(ctx *beecontext.Context) {
@@ -553,9 +585,9 @@ func MiddlewareForEcho() echo.MiddlewareFunc {
 }
 
 func ApplyToEcho(e *echo.Echo) {
-	lock.RLock()
-	defer lock.RUnlock()
-	for k, _ := range handlerMap {
+	ghrp.handlerLock.RLock()
+	defer ghrp.handlerLock.RUnlock()
+	for k, _ := range ghrp.handlerMap {
 		method := strings.Split(k, "$")[0]
 		path := strings.Split(k, "$")[1]
 		e.Add(method, path, func(c echo.Context) error {
@@ -567,6 +599,16 @@ func ApplyToEcho(e *echo.Echo) {
 			return nil
 		})
 	}
+}
+
+// get stat
+func GetStat() map[string]*stat {
+	return ghrp.GetStat()
+}
+
+// set global hrq
+func SetGlobalHrq(h *hrq) {
+	ghrp = h
 }
 
 func InstallFilterChanForBeego() {
