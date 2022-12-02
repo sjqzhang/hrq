@@ -1,6 +1,9 @@
 package hrq
 
-import "github.com/labstack/echo/v4"
+import (
+	"github.com/labstack/echo/v4"
+	"strings"
+)
 
 type echoAdapter struct {
 	ctx    echo.Context
@@ -12,11 +15,15 @@ func (e *echoAdapter) Abort() {
 	//panic("implement me")
 }
 
-func (e *echoAdapter) Next() error {
+func (e *echoAdapter) Next() *httpError {
 	c := e.ctx
 	next := e.reqRsp.req.Context().Value(hrqFilterNext)
 	if next != nil {
-		return next.(echo.HandlerFunc)(c)
+		if err := next.(echo.HandlerFunc)(c); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return errNotFound
+			}
+		}
 	}
 	return nil
 }

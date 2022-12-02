@@ -12,7 +12,7 @@ func (g *ginAdapter) Abort() {
 	//panic("implement me")
 }
 
-func (g *ginAdapter) Next() error {
+func (g *ginAdapter) Next() *httpError {
 	c := g.ctx
 	c.Request = g.reqRsp.req
 	c.Writer = &responseWriter{ResponseWriter: g.reqRsp.rsp}
