@@ -16,6 +16,7 @@ var Conf = &Config{
 	TimeoutProcess: 0,
 	TimeoutQueue:   0,
 	TempDir:        "/tmp",
+	EnableOverload: true,
 }
 
 var ghrp *hrq = New(Conf)

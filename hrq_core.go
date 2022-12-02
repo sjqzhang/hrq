@@ -3,6 +3,7 @@ package hrq
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/beego/beego/v2/server/web"
@@ -50,6 +51,8 @@ type Config struct {
 
 	// MaxConnection
 	MaxConnection int
+	// enable overload
+	EnableOverload bool
 }
 
 type hrq struct {
@@ -108,6 +111,13 @@ func (he *httpError) Error() string {
 		return fmt.Sprintf("code=%d, message=%v", he.Code, he.Message)
 	}
 	return fmt.Sprintf("code=%d, message=%v, internal=%v", he.Code, he.Message, he.Internal)
+}
+func (he *httpError) String() string {
+	buff, err := json.Marshal(he)
+	if err != nil {
+		return err.Error()
+	}
+	return string(buff)
 }
 
 func newHTTPError(code int, message ...interface{}) *httpError {
@@ -279,10 +289,10 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.initHrq(h.config.Workers, h.config.MaxQueueSize)
 	})
 
-	if len(h.chanReqRsp) >= h.config.MaxQueueSize*9/10 {
+	if h.config.EnableOverload && len(h.chanReqRsp) >= h.config.MaxQueueSize*9/10 {
 		r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(errServerOverloaded.Error()))
+		w.Write([]byte(errServerOverloaded.String()))
 		return
 	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == "POST" && r.ContentLength > 1024*1024*4 {
@@ -458,14 +468,13 @@ func (h *hrq) MiddlewareForGin() gin.HandlerFunc {
 		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
 		h.ServeHTTP(c.Writer, req)
 		if err := c.Request.Context().Value(hrqErrorKey); err != nil {
-			c.Error(err.(error))
 			c.Abort()
 		}
 	}
 }
 
 func (h *hrq) InstallFilterChanForBeego() {
-	web.InsertFilterChain("/*", func(next web.FilterFunc) web.FilterFunc {
+	web.InsertFilterChain("*", func(next web.FilterFunc) web.FilterFunc {
 		return func(ctx *beecontext.Context) {
 			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
 			c = context.WithValue(c, hrqFilterNext, next)
@@ -473,7 +482,7 @@ func (h *hrq) InstallFilterChanForBeego() {
 			h.ServeHTTP(ctx.ResponseWriter, ctx.Request)
 			if err := ctx.Request.Context().Value(hrqErrorKey); err != nil {
 				e := err.(*httpError)
-				ctx.Abort(e.Code, e.Error())
+				ctx.Abort(e.Code, e.String())
 			}
 		}
 	})
