@@ -9,7 +9,7 @@ import (
 )
 
 type adapter interface {
-	Abort()
+	Abort() interface{}
 	Next() *httpError
 }
 
@@ -19,8 +19,8 @@ type defaultAdapter struct {
 	reqRsp *reqrsq
 }
 
-func (d *defaultAdapter) Abort() {
-	panic("implement me")
+func (d *defaultAdapter) Abort() interface{} {
+	return nil
 }
 
 func (d *defaultAdapter) Next() *httpError {

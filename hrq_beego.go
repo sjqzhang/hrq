@@ -12,8 +12,8 @@ type beegoAdapter struct {
 	reqRsp *reqrsq
 }
 
-func (b *beegoAdapter) Abort() {
-	//panic("implement me")
+func (b *beegoAdapter) Abort() interface{}{
+	return nil
 }
 
 func (b *beegoAdapter) Next() *httpError {

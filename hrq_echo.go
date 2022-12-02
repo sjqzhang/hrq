@@ -1,6 +1,7 @@
 package hrq
 
 import (
+	"context"
 	"github.com/labstack/echo/v4"
 	"strings"
 )
@@ -11,8 +12,12 @@ type echoAdapter struct {
 	reqRsp *reqrsq
 }
 
-func (e *echoAdapter) Abort() {
-	//panic("implement me")
+func (e *echoAdapter) Abort() interface{} {
+	e.ctx.Error(echo.ErrTooManyRequests)
+	ctx := context.WithValue(e.ctx.Request().Context(), hrqErrorKey, echo.ErrTooManyRequests)
+	e.ctx.SetRequest(e.ctx.Request().WithContext(ctx))
+	return echo.ErrTooManyRequests
+
 }
 
 func (e *echoAdapter) Next() *httpError {

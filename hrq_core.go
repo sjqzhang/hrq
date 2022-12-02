@@ -71,6 +71,7 @@ const (
 	defaultStatus = http.StatusOK
 	hrqContextKey = "hrqContextKey"
 	hrqFilterNext = "hrqFilterNext"
+	hrqErrorKey   = "hrqErrorKey"
 )
 
 type httpError struct {
@@ -92,6 +93,7 @@ var (
 	errInternalServerError         = newHTTPError(http.StatusInternalServerError)
 	errRequestTimeout              = newHTTPError(http.StatusRequestTimeout)
 	errServiceUnavailable          = newHTTPError(http.StatusServiceUnavailable)
+	errServerOverloaded            = newHTTPError(http.StatusServiceUnavailable, "server overloaded")
 	errValidatorNotRegistered      = errors.New("validator not registered")
 	errRendererNotRegistered       = errors.New("renderer not registered")
 	errInvalidRedirectCode         = errors.New("invalid redirect status code")
@@ -239,6 +241,9 @@ func (h *hrq) initHrq(worker int, queueSize int) {
 				for {
 					select {
 					case reqRsp := <-h.chanReqRsp:
+						if reqRsp == nil {
+							continue
+						}
 						hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
 						if hrqCxt == nil {
 							hrqCxt = reqRsp.req.Context()
@@ -273,9 +278,13 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.once.Do(func() {
 		h.initHrq(h.config.Workers, h.config.MaxQueueSize)
 	})
-	// define request response struct
-	//judge request is multipart/form-data
 
+	if len(h.chanReqRsp) >= h.config.MaxQueueSize*9/10 {
+		r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(errServerOverloaded.Error()))
+		return
+	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == "POST" && r.ContentLength > 1024*1024*4 {
 		tmpFile, err := ioutil.TempFile(h.config.TempDir, "hrq_upload_")
 		if err == nil {
@@ -416,6 +425,22 @@ func (h *hrq) ApplyToEcho(e *echo.Echo) {
 	}
 }
 
+func (h *hrq) MiddlewareForEcho() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(ctx echo.Context) error {
+			c := context.WithValue(ctx.Request().Context(), hrqContextKey, ctx)
+			c = context.WithValue(c, hrqFilterNext, next)
+			ctx.SetRequest(ctx.Request().WithContext(c))
+			ghrp.ServeHTTP(ctx.Response().Writer, ctx.Request())
+			if err := ctx.Request().Context().Value(hrqErrorKey); err != nil {
+				ctx.Error(err.(error))
+				return err.(error)
+			}
+			return nil
+		}
+	}
+}
+
 func (h *hrq) ApplyFromGin(ginEngine *gin.Engine) {
 	for _, v := range ginEngine.Routes() {
 		h.Handle(v.Method, v.Path, func(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +457,10 @@ func (h *hrq) MiddlewareForGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		req := c.Request.WithContext(context.WithValue(c.Request.Context(), hrqContextKey, c))
 		h.ServeHTTP(c.Writer, req)
+		if err := c.Request.Context().Value(hrqErrorKey); err != nil {
+			c.Error(err.(error))
+			c.Abort()
+		}
 	}
 }
 
@@ -442,7 +471,10 @@ func (h *hrq) InstallFilterChanForBeego() {
 			c = context.WithValue(c, hrqFilterNext, next)
 			ctx.Request = ctx.Request.WithContext(c)
 			h.ServeHTTP(ctx.ResponseWriter, ctx.Request)
-			next(ctx)
+			if err := ctx.Request.Context().Value(hrqErrorKey); err != nil {
+				e := err.(*httpError)
+				ctx.Abort(e.Code, e.Error())
+			}
 		}
 	})
 }

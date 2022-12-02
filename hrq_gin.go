@@ -8,8 +8,8 @@ type ginAdapter struct {
 	reqRsp *reqrsq
 }
 
-func (g *ginAdapter) Abort() {
-	//panic("implement me")
+func (g *ginAdapter) Abort() interface{} {
+	return nil
 }
 
 func (g *ginAdapter) Next() *httpError {
