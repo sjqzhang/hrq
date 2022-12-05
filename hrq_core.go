@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -56,17 +57,19 @@ type Config struct {
 }
 
 type hrq struct {
-	handlerLock sync.RWMutex
-	handlerMap  map[string]http.HandlerFunc
-	once        sync.Once
-	mux         *http.ServeMux
-	chanReqRsp  chan *reqrsq
-	router      *httprouter.Router
-	config      *Config
-	chanReqInfo chan reqTimeInfo
-	statLock    sync.Mutex
-	statMap     map[string]*stat
-	maxConn     chan struct{}
+	handlerLock   sync.RWMutex
+	handlerMap    map[string]http.HandlerFunc
+	once          sync.Once
+	mux           *http.ServeMux
+	chanReqRsp    chan *reqrsq
+	router        *httprouter.Router
+	config        *Config
+	chanReqInfo   chan reqTimeInfo
+	statLock      sync.Mutex
+	statMap       map[string]*stat
+	maxConn       chan struct{}
+	mapWorker     map[string]*worker
+	handlerWorker map[uintptr]*worker
 }
 
 const (
@@ -75,6 +78,7 @@ const (
 	hrqContextKey = "hrqContextKey"
 	hrqFilterNext = "hrqFilterNext"
 	hrqErrorKey   = "hrqErrorKey"
+	hrqWorkerKey  = "hrqWorkerKey"
 )
 
 type httpError struct {
@@ -222,15 +226,17 @@ func New(conf *Config) *hrq {
 		conf.MaxConnection = 1000
 	}
 	h := &hrq{
-		mux:         http.NewServeMux(),
-		chanReqRsp:  make(chan *reqrsq, conf.MaxQueueSize),
-		config:      conf,
-		once:        sync.Once{},
-		router:      httprouter.New(),
-		statMap:     make(map[string]*stat),
-		chanReqInfo: make(chan reqTimeInfo, 10000),
-		handlerMap:  make(map[string]http.HandlerFunc),
-		maxConn:     make(chan struct{}, conf.MaxConnection),
+		mux:           http.NewServeMux(),
+		chanReqRsp:    make(chan *reqrsq, conf.MaxQueueSize),
+		config:        conf,
+		once:          sync.Once{},
+		router:        httprouter.New(),
+		statMap:       make(map[string]*stat),
+		chanReqInfo:   make(chan reqTimeInfo, 10000),
+		handlerMap:    make(map[string]http.HandlerFunc),
+		maxConn:       make(chan struct{}, conf.MaxConnection),
+		mapWorker:     make(map[string]*worker, conf.Workers),
+		handlerWorker: make(map[uintptr]*worker, conf.Workers),
 	}
 	h.mux.HandleFunc("/", h.ServeHTTP)
 	return h
@@ -327,7 +333,28 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//	defer cancel()
 	//}
 
-	h.chanReqRsp <- reqRsp
+	//key := reqRsp.method + "$" + reqRsp.path
+	//if v, ok := h.mapWorker[key]; ok {
+	//	v.submitReq(reqRsp)
+	//} else {
+	//	h.chanReqRsp <- reqRsp
+	//}
+
+	//get worker from context
+
+	if handler, _, _ := h.router.Lookup(r.Method, r.URL.Path); handler != nil {
+		ptr:=reflect.ValueOf(handler).Pointer()
+		if v, ok := h.handlerWorker[ptr]; ok {
+			v.submitReq(reqRsp)
+		} else {
+			h.chanReqRsp <- reqRsp
+		}
+	} else {
+		h.chanReqRsp <- reqRsp
+	}
+	//h.chanReqRsp <- reqRsp
+
+	//h.chanReqRsp <- reqRsp
 	<-reqRsp.done
 	ri.EndTime = time.Now().UnixMilli()
 	h.chanReqInfo <- ri
@@ -339,11 +366,19 @@ func (h *hrq) Handle(method string, path string, handler http.HandlerFunc) {
 
 	h.handlerLock.Lock()
 	defer h.handlerLock.Unlock()
-	h.handlerMap[method+"$"+path] = handler
+	key := method + "$" + path
+	h.handlerMap[key] = handler
+
+	if _, ok := h.mapWorker[key]; !ok {
+		h.mapWorker[key] = newWorker(100, 500, h)
+		h.mapWorker[key].start()
+	}
 
 	hl := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		handler(w, r)
 	}
+	//fmt.Printf("%p\n", &hl)
+	h.handlerWorker[reflect.ValueOf(hl).Pointer()] = h.mapWorker[key]
 	h.router.Handle(method, path, hl)
 }
 
