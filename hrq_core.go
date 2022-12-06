@@ -67,6 +67,15 @@ type Config struct {
 	MaxConnection int
 	// enable overload
 	EnableOverload bool
+	workerOptions  map[string]workerOption
+}
+
+func (c *Config) SetWorkerOption(method string, path string, option workerOption) *Config {
+	key := method + "$" + path
+	if _, ok := c.workerOptions[key]; !ok {
+		c.workerOptions[key] = option
+	}
+	return c
 }
 
 type hrq struct {
@@ -416,10 +425,17 @@ func (h *hrq) Handle(method string, path string, handler http.HandlerFunc, optio
 		if len(options) > 0 {
 			w = newWorker2()
 			w.apply(options...)
-			w.hrq= h
-			w.reqChan=make(chan *reqrsq, w.maxQueue)
+			w.hrq = h
+			w.reqChan = make(chan *reqrsq, w.maxQueue)
 		} else {
-			w = newWorker(h.config.PerRequestWorker, h.config.PerRequestQueue, h)
+			if o,ok:= h.config.workerOptions[key];ok {
+				w = newWorker2()
+				w.apply(o)
+				w.hrq = h
+				w.reqChan = make(chan *reqrsq, w.maxQueue)
+			} else {
+				w = newWorker(h.config.PerRequestWorker, h.config.PerRequestQueue, h)
+			}
 		}
 		h.mapWorker[key] = w
 		w.start()
@@ -433,38 +449,38 @@ func (h *hrq) Handle(method string, path string, handler http.HandlerFunc, optio
 }
 
 // GET is a shortcut for router.Handle(http.MethodGet, path, handle)
-func (h *hrq) GET(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodGet, path, handle,options...)
+func (h *hrq) GET(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodGet, path, handle, options...)
 }
 
 // HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
-func (h *hrq) HEAD(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodHead, path, handle,options...)
+func (h *hrq) HEAD(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodHead, path, handle, options...)
 }
 
 // OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
-func (h *hrq) OPTIONS(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodOptions, path, handle,options...)
+func (h *hrq) OPTIONS(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodOptions, path, handle, options...)
 }
 
 // POST is a shortcut for router.Handle(http.MethodPost, path, handle)
-func (h *hrq) POST(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodPost, path, handle,options...)
+func (h *hrq) POST(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodPost, path, handle, options...)
 }
 
 // PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
-func (h *hrq) PUT(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodPut, path, handle,options...)
+func (h *hrq) PUT(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodPut, path, handle, options...)
 }
 
 // PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
-func (h *hrq) PATCH(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodPatch, path, handle,options...)
+func (h *hrq) PATCH(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodPatch, path, handle, options...)
 }
 
 // DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
-func (h *hrq) DELETE(path string, handle http.HandlerFunc,options ...workerOption) {
-	h.Handle(http.MethodDelete, path, handle,options...)
+func (h *hrq) DELETE(path string, handle http.HandlerFunc, options ...workerOption) {
+	h.Handle(http.MethodDelete, path, handle, options...)
 }
 
 func (h *hrq) Router() *httprouter.Router {

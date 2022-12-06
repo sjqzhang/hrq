@@ -19,6 +19,8 @@ var Conf = &Config{
 	EnableOverload:   true,
 	PerRequestQueue:  runtime.NumCPU() * 10,
 	PerRequestWorker: runtime.NumCPU() * 5,
+	workerOptions: make(map[string]workerOption),
+
 }
 
 var ghrp *hrq = New(Conf)
