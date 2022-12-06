@@ -9,6 +9,17 @@ type worker struct {
 	hrq      *hrq
 }
 
+func newWorker2() *worker {
+	return &worker{}
+}
+
+// apply worker options
+func (w *worker) apply(opts ...workerOption) {
+	for _, opt := range opts {
+		opt(w)
+	}
+}
+
 func newWorker(max int, maxQueue int, hrq *hrq) *worker {
 	w := &worker{
 		max:      max,
@@ -49,6 +60,10 @@ func (w *worker) run() {
 				hrqCxt := reqRsp.req.Context().Value(hrqContextKey)
 				if hrqCxt == nil {
 					hrqCxt = reqRsp.req.Context()
+				}
+				if w.hrq.checkOverLoad(reqRsp.rsp, reqRsp.req) {
+					reqRsp.done <- true
+					continue
 				}
 				apt := w.hrq.getAdapter(hrqCxt, reqRsp, w.hrq)
 				err := apt.Next()

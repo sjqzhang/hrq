@@ -22,7 +22,7 @@ func (e *echoAdapter) Abort() interface{} {
 
 func (e *echoAdapter) Next() *httpError {
 	c := e.ctx
-	next := e.reqRsp.req.Context().Value(hrqFilterNext)
+	next := e.reqRsp.req.Context().Value(hrqFilterNextKey)
 	if next != nil {
 		if err := next.(echo.HandlerFunc)(c); err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "not found") {

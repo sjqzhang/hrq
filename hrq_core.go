@@ -34,6 +34,15 @@ type reqrsq struct {
 	done   chan bool
 }
 
+type workerOption func(*worker)
+
+func WithWorkerOption(count int, maxQueue int) workerOption {
+	return func(w *worker) {
+		w.max = count
+		w.maxQueue = maxQueue
+	}
+}
+
 type Config struct {
 	// The number of goroutines that will be used to handle requests.
 	// If <= 0, then the number of CPUs will be used.
@@ -49,6 +58,10 @@ type Config struct {
 	// TimeoutProcess is the maximum duration before timing out processing of the request.
 	// If TimeoutProcess is zero, no timeout is set.
 	TimeoutProcess int64
+
+	PerRequestWorker int
+
+	PerRequestQueue int
 
 	// MaxConnection
 	MaxConnection int
@@ -73,12 +86,13 @@ type hrq struct {
 }
 
 const (
-	noWritten     = -1
-	defaultStatus = http.StatusOK
-	hrqContextKey = "hrqContextKey"
-	hrqFilterNext = "hrqFilterNext"
-	hrqErrorKey   = "hrqErrorKey"
-	hrqWorkerKey  = "hrqWorkerKey"
+	noWritten        = -1
+	defaultStatus    = http.StatusOK
+	hrqContextKey    = "hrqContextKey"
+	hrqFilterNextKey = "hrqFilterNextKey"
+	hrqErrorKey      = "hrqErrorKey"
+	hrqWorkerKey     = "hrqWorkerKey"
+	hrqStartTimeKey  = "hrqStartTimeKey"
 )
 
 type httpError struct {
@@ -264,6 +278,10 @@ func (h *hrq) initHrq(worker int, queueSize int) {
 						if hrqCxt == nil {
 							hrqCxt = reqRsp.req.Context()
 						}
+						if h.checkOverLoad(reqRsp.rsp, reqRsp.req) {
+							reqRsp.done <- true
+							continue
+						}
 						apt := h.getAdapter(hrqCxt, reqRsp, h)
 						err := apt.Next()
 						if err != nil {
@@ -284,23 +302,45 @@ func (h *hrq) initHrq(worker int, queueSize int) {
 	}
 }
 
+func (h *hrq) checkOverLoad(w http.ResponseWriter, r *http.Request) bool {
+
+	startTime := r.Context().Value(hrqStartTimeKey)
+	if startTime != nil {
+		//fmt.Println(time.Now().UnixNano()-startTime.(int64))
+		if time.Now().UnixNano()-startTime.(int64) > h.config.TimeoutQueue*1000 {
+			r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(errServerOverloaded.String()))
+			return true
+		}
+	} else {
+		if h.config.MaxConnection > 0 {
+			select {
+			case h.maxConn <- struct{}{}:
+				return false
+			default:
+				r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte(errServerOverloaded.String()))
+				return true
+			}
+		}
+	}
+	return false
+
+}
+
 // define default http handler
 func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.maxConn <- struct{}{}
+	if h.checkOverLoad(w, r) {
+		return
+	}
 	defer func() {
 		<-h.maxConn
 	}()
-
 	h.once.Do(func() {
 		h.initHrq(h.config.Workers, h.config.MaxQueueSize)
 	})
-
-	if h.config.EnableOverload && len(h.chanReqRsp) >= h.config.MaxQueueSize*9/10 {
-		r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(errServerOverloaded.String()))
-		return
-	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == "POST" && r.ContentLength > 1024*1024*4 {
 		tmpFile, err := ioutil.TempFile(h.config.TempDir, "hrq_upload_")
 		if err == nil {
@@ -314,8 +354,10 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	c := make(chan bool, 1)
+	startTime := time.Now().UnixNano()
+	r = r.WithContext(context.WithValue(r.Context(), hrqStartTimeKey, startTime))
 	reqRsp := &reqrsq{
-		begin:  time.Now().UnixMilli(),
+		begin:  startTime,
 		uuid:   "uuid",
 		path:   r.URL.Path,
 		method: r.Method,
@@ -324,7 +366,7 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		done:   c,
 	}
 	ri := reqTimeInfo{
-		StartTime: time.Now().UnixMilli(),
+		StartTime: startTime,
 		Path:      r.URL.Path,
 	}
 	//if h.config.TimeoutProcess > 0 {
@@ -343,7 +385,7 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//get worker from context
 
 	if handler, _, _ := h.router.Lookup(r.Method, r.URL.Path); handler != nil {
-		ptr:=reflect.ValueOf(handler).Pointer()
+		ptr := reflect.ValueOf(handler).Pointer()
 		if v, ok := h.handlerWorker[ptr]; ok {
 			v.submitReq(reqRsp)
 		} else {
@@ -356,13 +398,13 @@ func (h *hrq) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	//h.chanReqRsp <- reqRsp
 	<-reqRsp.done
-	ri.EndTime = time.Now().UnixMilli()
+	ri.EndTime = time.Now().UnixNano()
 	h.chanReqInfo <- ri
 
 	//close(c)
 }
 
-func (h *hrq) Handle(method string, path string, handler http.HandlerFunc) {
+func (h *hrq) Handle(method string, path string, handler http.HandlerFunc, options ...workerOption) {
 
 	h.handlerLock.Lock()
 	defer h.handlerLock.Unlock()
@@ -370,51 +412,59 @@ func (h *hrq) Handle(method string, path string, handler http.HandlerFunc) {
 	h.handlerMap[key] = handler
 
 	if _, ok := h.mapWorker[key]; !ok {
-		h.mapWorker[key] = newWorker(100, 500, h)
-		h.mapWorker[key].start()
+		var w *worker
+		if len(options) > 0 {
+			w = newWorker2()
+			w.apply(options...)
+			w.hrq= h
+			w.reqChan=make(chan *reqrsq, w.maxQueue)
+		} else {
+			w = newWorker(h.config.PerRequestWorker, h.config.PerRequestQueue, h)
+		}
+		h.mapWorker[key] = w
+		w.start()
 	}
 
 	hl := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		handler(w, r)
 	}
-	//fmt.Printf("%p\n", &hl)
 	h.handlerWorker[reflect.ValueOf(hl).Pointer()] = h.mapWorker[key]
 	h.router.Handle(method, path, hl)
 }
 
 // GET is a shortcut for router.Handle(http.MethodGet, path, handle)
-func (h *hrq) GET(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodGet, path, handle)
+func (h *hrq) GET(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodGet, path, handle,options...)
 }
 
 // HEAD is a shortcut for router.Handle(http.MethodHead, path, handle)
-func (h *hrq) HEAD(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodHead, path, handle)
+func (h *hrq) HEAD(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodHead, path, handle,options...)
 }
 
 // OPTIONS is a shortcut for router.Handle(http.MethodOptions, path, handle)
-func (h *hrq) OPTIONS(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodOptions, path, handle)
+func (h *hrq) OPTIONS(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodOptions, path, handle,options...)
 }
 
 // POST is a shortcut for router.Handle(http.MethodPost, path, handle)
-func (h *hrq) POST(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodPost, path, handle)
+func (h *hrq) POST(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodPost, path, handle,options...)
 }
 
 // PUT is a shortcut for router.Handle(http.MethodPut, path, handle)
-func (h *hrq) PUT(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodPut, path, handle)
+func (h *hrq) PUT(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodPut, path, handle,options...)
 }
 
 // PATCH is a shortcut for router.Handle(http.MethodPatch, path, handle)
-func (h *hrq) PATCH(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodPatch, path, handle)
+func (h *hrq) PATCH(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodPatch, path, handle,options...)
 }
 
 // DELETE is a shortcut for router.Handle(http.MethodDelete, path, handle)
-func (h *hrq) DELETE(path string, handle http.HandlerFunc) {
-	h.Handle(http.MethodDelete, path, handle)
+func (h *hrq) DELETE(path string, handle http.HandlerFunc,options ...workerOption) {
+	h.Handle(http.MethodDelete, path, handle,options...)
 }
 
 func (h *hrq) Router() *httprouter.Router {
@@ -474,7 +524,7 @@ func (h *hrq) MiddlewareForEcho() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(ctx echo.Context) error {
 			c := context.WithValue(ctx.Request().Context(), hrqContextKey, ctx)
-			c = context.WithValue(c, hrqFilterNext, next)
+			c = context.WithValue(c, hrqFilterNextKey, next)
 			ctx.SetRequest(ctx.Request().WithContext(c))
 			ghrp.ServeHTTP(ctx.Response().Writer, ctx.Request())
 			if err := ctx.Request().Context().Value(hrqErrorKey); err != nil {
@@ -512,7 +562,7 @@ func (h *hrq) InstallFilterChanForBeego() {
 	web.InsertFilterChain("*", func(next web.FilterFunc) web.FilterFunc {
 		return func(ctx *beecontext.Context) {
 			c := context.WithValue(ctx.Request.Context(), hrqContextKey, ctx)
-			c = context.WithValue(c, hrqFilterNext, next)
+			c = context.WithValue(c, hrqFilterNextKey, next)
 			ctx.Request = ctx.Request.WithContext(c)
 			h.ServeHTTP(ctx.ResponseWriter, ctx.Request)
 			if err := ctx.Request.Context().Value(hrqErrorKey); err != nil {

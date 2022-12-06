@@ -18,7 +18,7 @@ func (b *beegoAdapter) Abort() interface{}{
 
 func (b *beegoAdapter) Next() *httpError {
 	c := b.ctx
-	next := b.reqRsp.req.Context().Value(hrqFilterNext)
+	next := b.reqRsp.req.Context().Value(hrqFilterNextKey)
 	if next != nil {
 		next.(web.FilterFunc)(c)
 
