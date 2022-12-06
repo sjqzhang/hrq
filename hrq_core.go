@@ -316,7 +316,7 @@ func (h *hrq) checkOverLoad(w http.ResponseWriter, r *http.Request) bool {
 	startTime := r.Context().Value(hrqStartTimeKey)
 	if startTime != nil {
 		//fmt.Println(time.Now().UnixNano()-startTime.(int64))
-		if time.Now().UnixNano()-startTime.(int64) > h.config.TimeoutQueue*1000 {
+		if time.Now().UnixNano()-startTime.(int64) > h.config.TimeoutQueue*1000*1000 {
 			r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(errServerOverloaded.String()))
@@ -495,7 +495,7 @@ func (h *hrq) ApplyToGin(ginEngine *gin.Engine) {
 		path := strings.Split(k, "$")[1]
 		ginEngine.Handle(method, path, func(c *gin.Context) {
 			if handler, _, _ := h.router.Lookup(method, path); handler != nil {
-				handler(c.Writer, c.Request, nil)
+				handler(c.Writer, c.Request,nil)
 			} else {
 				c.Writer.WriteHeader(http.StatusNotFound)
 			}
@@ -570,6 +570,7 @@ func (h *hrq) MiddlewareForGin() gin.HandlerFunc {
 		h.ServeHTTP(c.Writer, req)
 		if err := c.Request.Context().Value(hrqErrorKey); err != nil {
 			c.Abort()
+			return
 		}
 	}
 }
