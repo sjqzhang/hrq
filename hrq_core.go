@@ -36,9 +36,9 @@ type reqrsq struct {
 
 type workerOption func(*worker)
 
-func WithWorkerOption(count int, maxQueue int) workerOption {
+func WithWorkerOption(workerCount int, maxQueue int) workerOption {
 	return func(w *worker) {
-		w.max = count
+		w.max = workerCount
 		w.maxQueue = maxQueue
 	}
 }
