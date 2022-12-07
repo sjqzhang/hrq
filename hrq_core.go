@@ -315,7 +315,6 @@ func (h *hrq) checkOverLoad(w http.ResponseWriter, r *http.Request) bool {
 
 	startTime := r.Context().Value(hrqStartTimeKey)
 	if startTime != nil {
-		//fmt.Println(time.Now().UnixNano()-startTime.(int64))
 		if time.Now().UnixNano()-startTime.(int64) > h.config.TimeoutQueue*1000*1000 {
 			r = r.WithContext(context.WithValue(r.Context(), hrqErrorKey, errServerOverloaded))
 			w.WriteHeader(http.StatusServiceUnavailable)
